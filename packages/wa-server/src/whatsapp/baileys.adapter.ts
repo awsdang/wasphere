@@ -1,8 +1,15 @@
-import * as https from 'https';
-import * as net from 'net';
-import { HttpsProxyAgent } from 'https-proxy-agent';
-import { SocksProxyAgent } from 'socks-proxy-agent';
-import { BadRequestException, HttpException, HttpStatus, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
+import * as https from "https";
+import * as net from "net";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { SocksProxyAgent } from "socks-proxy-agent";
+import {
+  BadRequestException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  NotFoundException,
+  OnModuleInit,
+} from "@nestjs/common";
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
@@ -17,14 +24,19 @@ import makeWASocket, {
   getKeyAuthor,
   jidNormalizedUser,
   downloadMediaMessage,
-} from '@whiskeysockets/baileys';
-import { Boom } from '@hapi/boom';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as QRCode from 'qrcode';
-import { WebhookService } from '../webhooks/webhook.service';
-import { sanitizeMessage, sanitizeMessageUpdate, sanitizeReceipt } from '../webhooks/sanitize-message';
-import { safeFetch } from '../common/safe-fetch';
+  WAMessage,
+} from "@whiskeysockets/baileys";
+import { Boom } from "@hapi/boom";
+import * as fs from "fs";
+import * as path from "path";
+import * as QRCode from "qrcode";
+import { WebhookService } from "../webhooks/webhook.service";
+import {
+  sanitizeMessage,
+  sanitizeMessageUpdate,
+  sanitizeReceipt,
+} from "../webhooks/sanitize-message";
+import { safeFetch } from "../common/safe-fetch";
 import {
   IWhatsAppAdapter,
   SessionInfo,
@@ -34,28 +46,31 @@ import {
   ProfileInfo,
   GroupSetting,
   PresenceType,
-} from './whatsapp-adapter.interface';
-import { SessionConfig, SESSION_CONFIG_DEFAULTS } from './session-config.interface';
+} from "./whatsapp-adapter.interface";
+import {
+  SessionConfig,
+  SESSION_CONFIG_DEFAULTS,
+} from "./session-config.interface";
 
 // Allowlist for Baileys disconnect reason strings surfaced in API responses / webhooks.
 // Prevents raw Boom payload text (which may contain internal state) reaching clients.
 const SAFE_DISCONNECT_REASONS: Record<string, string> = {
-  '401': 'Unauthorized',
-  '405': 'Method Not Allowed',
-  '408': 'Connection Timeout',
-  '410': 'Gone',
-  '428': 'Precondition Required',
-  '440': 'Login Timeout',
-  '500': 'Internal Server Error',
-  '503': 'Service Unavailable',
-  'loggedOut': 'Logged out',
-  'badSession': 'Bad session',
-  'Unauthorized': 'Unauthorized',
-  'unknown': 'Unknown',
+  "401": "Unauthorized",
+  "405": "Method Not Allowed",
+  "408": "Connection Timeout",
+  "410": "Gone",
+  "428": "Precondition Required",
+  "440": "Login Timeout",
+  "500": "Internal Server Error",
+  "503": "Service Unavailable",
+  loggedOut: "Logged out",
+  badSession: "Bad session",
+  Unauthorized: "Unauthorized",
+  unknown: "Unknown",
 };
 
 function sanitiseReason(raw: string): string {
-  return SAFE_DISCONNECT_REASONS[raw] ?? 'Disconnected';
+  return SAFE_DISCONNECT_REASONS[raw] ?? "Disconnected";
 }
 
 // Fallback WA protocol version used when fetchLatestBaileysVersion() fails.
@@ -65,15 +80,20 @@ function sanitiseReason(raw: string): string {
 // suggest WhatsApp has rotated its minimum accepted version.
 const WA_VERSION_FALLBACK: [number, number, number] = [2, 3000, 1015901307];
 
-async function resolveMediaBuffer(url: string, maxBytes: number): Promise<Buffer> {
-  if (url.startsWith('data:')) {
-    const commaIdx = url.indexOf(',');
-    if (commaIdx === -1 || !url.slice(0, commaIdx).endsWith(';base64')) {
-      throw new Error('Invalid data URI: must be base64-encoded');
+async function resolveMediaBuffer(
+  url: string,
+  maxBytes: number,
+): Promise<Buffer> {
+  if (url.startsWith("data:")) {
+    const commaIdx = url.indexOf(",");
+    if (commaIdx === -1 || !url.slice(0, commaIdx).endsWith(";base64")) {
+      throw new Error("Invalid data URI: must be base64-encoded");
     }
-    const buf = Buffer.from(url.slice(commaIdx + 1), 'base64');
+    const buf = Buffer.from(url.slice(commaIdx + 1), "base64");
     if (buf.length > maxBytes) {
-      throw new Error(`Data URI exceeds maximum size of ${Math.round(maxBytes / (1024 * 1024))} MiB`);
+      throw new Error(
+        `Data URI exceeds maximum size of ${Math.round(maxBytes / (1024 * 1024))} MiB`,
+      );
     }
     return buf;
   }
@@ -87,19 +107,25 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
   private readonly sessionConfigs = new Map<string, SessionConfig>();
   // Per-session outgoing-send timestamps (ms) for the per-minute rate cap.
   private readonly sendWindow = new Map<string, number[]>();
-  private readonly sessionsDir = './sessions';
+  private readonly sessionsDir = "./sessions";
   private readonly MAX_RETRIES = 5;
   private readonly RETRY_DELAY_MS = 5000;
 
   // Per session: Map<messageId, proto.IWebMessageInfo>
   // Eviction: when size reaches 100, delete the oldest inserted key before inserting the new one.
-  private readonly messageCache = new Map<string, Map<string, proto.IWebMessageInfo>>();
+  private readonly messageCache = new Map<
+    string,
+    Map<string, proto.IWebMessageInfo>
+  >();
   private readonly MESSAGE_CACHE_LIMIT = 100;
   private readonly qrMeta = new Map<string, { generatedAt: Date }>();
   // Profile-picture URL cache keyed by `${sessionId}:${jid}`. WhatsApp pic URLs
   // are temporary, so entries are refreshed after AVATAR_TTL_MS. A null url is
   // cached too (contact has no pic / pic is private) to avoid re-fetching.
-  private readonly avatarCache = new Map<string, { url: string | null; at: number }>();
+  private readonly avatarCache = new Map<
+    string,
+    { url: string | null; at: number }
+  >();
   private readonly AVATAR_TTL_MS = 6 * 60 * 60 * 1000; // 6h
 
   constructor(private webhookService: WebhookService) {
@@ -119,39 +145,39 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     const resolvedDir = path.resolve(this.sessionsDir);
     const candidate = path.resolve(this.sessionsDir, sessionId);
     if (!candidate.startsWith(resolvedDir + path.sep)) {
-      throw new BadRequestException({ error: 'INVALID_SESSION_ID' });
+      throw new BadRequestException({ error: "INVALID_SESSION_ID" });
     }
     return candidate;
   }
 
   private audioMimetype(url: string, isVoiceNote: boolean): string {
-    if (isVoiceNote) return 'audio/ogg; codecs=opus';
-    if (url.startsWith('data:')) {
-      const mime = url.slice(5, url.indexOf(';'));
-      return mime || 'audio/mpeg';
+    if (isVoiceNote) return "audio/ogg; codecs=opus";
+    if (url.startsWith("data:")) {
+      const mime = url.slice(5, url.indexOf(";"));
+      return mime || "audio/mpeg";
     }
-    const ext = url.split('?')[0].split('.').pop()?.toLowerCase() ?? '';
+    const ext = url.split("?")[0].split(".").pop()?.toLowerCase() ?? "";
     const map: Record<string, string> = {
-      mp3: 'audio/mpeg',
-      mp4: 'audio/mp4',
-      m4a: 'audio/mp4',
-      aac: 'audio/aac',
-      wav: 'audio/wav',
-      flac: 'audio/flac',
-      ogg: 'audio/ogg',
-      opus: 'audio/ogg; codecs=opus',
+      mp3: "audio/mpeg",
+      mp4: "audio/mp4",
+      m4a: "audio/mp4",
+      aac: "audio/aac",
+      wav: "audio/wav",
+      flac: "audio/flac",
+      ogg: "audio/ogg",
+      opus: "audio/ogg; codecs=opus",
     };
-    return map[ext] ?? 'audio/mpeg';
+    return map[ext] ?? "audio/mpeg";
   }
 
   private toJid(number: string): string {
-    if (number.includes('@')) return number;
-    const clean = number.replace(/[^0-9]/g, '');
+    if (number.includes("@")) return number;
+    const clean = number.replace(/[^0-9]/g, "");
     return `${clean}@s.whatsapp.net`;
   }
 
   private toGroupJid(id: string): string {
-    if (id.includes('@g.us')) return id;
+    if (id.includes("@g.us")) return id;
     return `${id}@g.us`;
   }
 
@@ -170,18 +196,22 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
 
   private getSocket(sessionId: string): WASocket {
     const sock = this.sessions.get(sessionId);
-    if (!sock) throw new NotFoundException(`Session ${sessionId} not found or not connected`);
+    if (!sock)
+      throw new NotFoundException(
+        `Session ${sessionId} not found or not connected`,
+      );
     return sock;
   }
 
   private async applyRandomDelay(sessionId: string): Promise<void> {
     // Per-minute throughput cap first, then the human-like random pause.
     await this.applyRateLimit(sessionId);
-    const config = this.sessionConfigs.get(sessionId) ?? SESSION_CONFIG_DEFAULTS;
+    const config =
+      this.sessionConfigs.get(sessionId) ?? SESSION_CONFIG_DEFAULTS;
     const { random_delay_min_ms: min, random_delay_max_ms: max } = config;
     if (min === 0 && max === 0) return;
     const delay = min + Math.floor(Math.random() * (max - min + 1));
-    await new Promise(r => setTimeout(r, delay));
+    await new Promise((r) => setTimeout(r, delay));
   }
 
   /**
@@ -190,10 +220,13 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
    * in the window ages out — so the configured rate is never exceeded. 0 = off.
    */
   private async applyRateLimit(sessionId: string): Promise<void> {
-    const max = (this.sessionConfigs.get(sessionId) ?? SESSION_CONFIG_DEFAULTS).max_messages_per_minute ?? 0;
+    const max =
+      (this.sessionConfigs.get(sessionId) ?? SESSION_CONFIG_DEFAULTS)
+        .max_messages_per_minute ?? 0;
     if (!max || max <= 0) return;
     const WINDOW = 60_000;
-    const prune = (arr: number[], now: number) => arr.filter((t) => now - t < WINDOW);
+    const prune = (arr: number[], now: number) =>
+      arr.filter((t) => now - t < WINDOW);
 
     let now = Date.now();
     let win = prune(this.sendWindow.get(sessionId) ?? [], now);
@@ -214,12 +247,25 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
   // that happens inside Baileys. Intentional trade-off documented in design doc.
   private preflightProxy(proxyUrl: string): Promise<void> {
     const { hostname, port, protocol } = new URL(proxyUrl);
-    const portNum = parseInt(port || (protocol === 'https:' ? '443' : '80'), 10);
+    const portNum = parseInt(
+      port || (protocol === "https:" ? "443" : "80"),
+      10,
+    );
     return new Promise((resolve, reject) => {
       const sock = net.createConnection({ host: hostname, port: portNum });
-      const timer = setTimeout(() => { sock.destroy(); reject(new Error('timeout')); }, 5000);
-      sock.on('connect', () => { clearTimeout(timer); sock.destroy(); resolve(); });
-      sock.on('error', (err) => { clearTimeout(timer); reject(err); });
+      const timer = setTimeout(() => {
+        sock.destroy();
+        reject(new Error("timeout"));
+      }, 5000);
+      sock.on("connect", () => {
+        clearTimeout(timer);
+        sock.destroy();
+        resolve();
+      });
+      sock.on("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
     });
   }
 
@@ -229,13 +275,18 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
   // If a multi-tenant hosted mode is ever added, revisit this decision.
   private buildProxyAgent(proxyUrl: string): https.Agent {
     const { protocol } = new URL(proxyUrl);
-    if (protocol === 'socks5:') return new SocksProxyAgent(proxyUrl) as unknown as https.Agent;
+    if (protocol === "socks5:")
+      return new SocksProxyAgent(proxyUrl) as unknown as https.Agent;
     return new HttpsProxyAgent(proxyUrl) as unknown as https.Agent;
   }
 
   // ─── Session lifecycle ──────────────────────────────────────────────────
 
-  async createSession(sessionId: string, proxy?: string, config?: Partial<SessionConfig>): Promise<SessionInfo> {
+  async createSession(
+    sessionId: string,
+    proxy?: string,
+    config?: Partial<SessionConfig>,
+  ): Promise<SessionInfo> {
     // Idempotency first — existing session short-circuits before any network I/O.
     if (this.sessionInfo.has(sessionId)) {
       return this.getSessionInfo(sessionId);
@@ -249,22 +300,31 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       } catch (err: any) {
         console.warn(`[${sessionId}] Proxy preflight failed: ${err.message}`);
         throw new HttpException(
-          { message: 'Proxy unreachable or timed out', code: 'PROXY_PREFLIGHT_FAILED' },
+          {
+            message: "Proxy unreachable or timed out",
+            code: "PROXY_PREFLIGHT_FAILED",
+          },
           HttpStatus.UNPROCESSABLE_ENTITY,
         );
       }
     }
 
-    const maxSessions = parseInt(process.env.MAX_SESSIONS ?? '10', 10);
+    const maxSessions = parseInt(process.env.MAX_SESSIONS ?? "10", 10);
     if (this.sessionInfo.size >= maxSessions) {
-      throw new HttpException({ message: 'Maximum session limit reached' }, HttpStatus.TOO_MANY_REQUESTS);
+      throw new HttpException(
+        { message: "Maximum session limit reached" },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
 
-    const initialConfig: SessionConfig = { ...SESSION_CONFIG_DEFAULTS, ...config };
+    const initialConfig: SessionConfig = {
+      ...SESSION_CONFIG_DEFAULTS,
+      ...config,
+    };
 
     this.sessionInfo.set(sessionId, {
       id: sessionId,
-      status: 'connecting',
+      status: "connecting",
       retryCount: 0,
       lastDisconnectReason: null,
       proxy,
@@ -280,11 +340,20 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     if (!info) throw new NotFoundException(`Session ${sessionId} not found`);
 
     // Ensure config is always present (falls back to in-memory map or defaults)
-    const config = this.sessionConfigs.get(sessionId) ?? SESSION_CONFIG_DEFAULTS;
+    const config =
+      this.sessionConfigs.get(sessionId) ?? SESSION_CONFIG_DEFAULTS;
     const infoWithConfig: SessionInfo = { ...info, config };
 
-    if (infoWithConfig.status === 'qr_ready' && infoWithConfig.qrExpiresAt && new Date() > infoWithConfig.qrExpiresAt) {
-      const expired: SessionInfo = { ...infoWithConfig, status: 'qr_expired', qrCode: undefined };
+    if (
+      infoWithConfig.status === "qr_ready" &&
+      infoWithConfig.qrExpiresAt &&
+      new Date() > infoWithConfig.qrExpiresAt
+    ) {
+      const expired: SessionInfo = {
+        ...infoWithConfig,
+        status: "qr_expired",
+        qrCode: undefined,
+      };
       this.sessionInfo.set(sessionId, expired);
       return expired;
     }
@@ -305,10 +374,10 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     const info = this.sessionInfo.get(sessionId)!;
 
     if (sock) {
-      if (info.status === 'connected') {
+      if (info.status === "connected") {
         await Promise.race([
           sock.logout().catch(() => {}),
-          new Promise(r => setTimeout(r, 5000)),
+          new Promise((r) => setTimeout(r, 5000)),
         ]);
       }
       sock.end(undefined);
@@ -326,7 +395,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       fs.rmSync(sessionPath, { recursive: true });
     }
 
-    await this.webhookService.fire('session.deleted', sessionId, { sessionId });
+    await this.webhookService.fire("session.deleted", sessionId, { sessionId });
   }
 
   async logoutSession(sessionId: string): Promise<void> {
@@ -342,7 +411,11 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
 
   // ─── Core socket init ──────────────────────────────────────────────────
 
-  private async initSocket(sessionId: string, proxy?: string, configFields?: Partial<SessionConfig>): Promise<void> {
+  private async initSocket(
+    sessionId: string,
+    proxy?: string,
+    configFields?: Partial<SessionConfig>,
+  ): Promise<void> {
     const sessionPath = this.resolveSessionPath(sessionId);
     if (!fs.existsSync(sessionPath)) {
       fs.mkdirSync(sessionPath, { recursive: true });
@@ -350,16 +423,19 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
 
     // Persist proxy URL alongside session credentials so it survives restarts.
     if (proxy) {
-      const proxyFile = path.join(sessionPath, 'proxy.json');
-      fs.writeFileSync(proxyFile, JSON.stringify({ proxy }), 'utf8');
+      const proxyFile = path.join(sessionPath, "proxy.json");
+      fs.writeFileSync(proxyFile, JSON.stringify({ proxy }), "utf8");
     }
 
     // Persist config if any config fields were supplied at creation time.
     if (configFields && Object.keys(configFields).length > 0) {
-      const mergedConfig: SessionConfig = { ...SESSION_CONFIG_DEFAULTS, ...configFields };
-      const configFile = path.join(sessionPath, 'config.json');
-      const tmpFile = configFile + '.tmp';
-      fs.writeFileSync(tmpFile, JSON.stringify(mergedConfig), 'utf8');
+      const mergedConfig: SessionConfig = {
+        ...SESSION_CONFIG_DEFAULTS,
+        ...configFields,
+      };
+      const configFile = path.join(sessionPath, "config.json");
+      const tmpFile = configFile + ".tmp";
+      fs.writeFileSync(tmpFile, JSON.stringify(mergedConfig), "utf8");
       fs.renameSync(tmpFile, configFile);
       this.sessionConfigs.set(sessionId, mergedConfig);
     } else {
@@ -377,7 +453,9 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       version = fetched.version;
     } catch {
       version = WA_VERSION_FALLBACK;
-      console.warn(`[${sessionId}] fetchLatestBaileysVersion failed (likely proxy-only network), using WA_VERSION_FALLBACK`);
+      console.warn(
+        `[${sessionId}] fetchLatestBaileysVersion failed (likely proxy-only network), using WA_VERSION_FALLBACK`,
+      );
     }
 
     const socketOptions: Parameters<typeof makeWASocket>[0] = {
@@ -387,14 +465,14 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
         keys: makeCacheableSignalKeyStore(state.keys, console as any),
       },
       printQRInTerminal: true,
-      browser: ['WaSphere', 'Chrome', '120.0.0'],
+      browser: ["WaSphere", "Chrome", "120.0.0"],
       markOnlineOnConnect: false,
       cachedGroupMetadata: async () => undefined,
       retryRequestDelayMs: 2000,
       // Required for Signal Protocol retries (e.g. poll vote decryption from @lid devices)
       getMessage: async (key) => {
         const cache = this.messageCache.get(sessionId);
-        return cache?.get(key.id ?? '')?.message ?? undefined;
+        return cache?.get(key.id ?? "")?.message ?? undefined;
       },
     };
 
@@ -408,13 +486,13 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
 
     // ─── Event Listeners ────────────────────────────────────────────
 
-    sock.ev.on('creds.update', saveCreds);
+    sock.ev.on("creds.update", saveCreds);
 
-    sock.ev.on('connection.update', async (update) => {
+    sock.ev.on("connection.update", async (update) => {
       await this.handleConnectionUpdate(sessionId, update);
     });
 
-    sock.ev.on('messages.upsert', async (m) => {
+    sock.ev.on("messages.upsert", async (m) => {
       // Cache all messages (including own) so getMessage() works during Signal retries
       for (const msg of m.messages) {
         this.cacheMessage(sessionId, msg);
@@ -422,32 +500,44 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       await this.handleIncomingMessages(sessionId, m);
     });
 
-    sock.ev.on('messages.update', async (updates) => {
-      await this.webhookService.fire('messages.update', sessionId, updates.map(sanitizeMessageUpdate));
+    sock.ev.on("messages.update", async (updates) => {
+      await this.webhookService.fire(
+        "messages.update",
+        sessionId,
+        updates.map(sanitizeMessageUpdate),
+      );
     });
 
-    sock.ev.on('message-receipt.update', async (updates) => {
-      await this.webhookService.fire('message.receipt', sessionId, updates.map(sanitizeReceipt));
+    sock.ev.on("message-receipt.update", async (updates) => {
+      await this.webhookService.fire(
+        "message.receipt",
+        sessionId,
+        updates.map(sanitizeReceipt),
+      );
     });
 
-    sock.ev.on('presence.update', async (update) => {
-      await this.webhookService.fire('presence.update', sessionId, update);
+    sock.ev.on("presence.update", async (update) => {
+      await this.webhookService.fire("presence.update", sessionId, update);
     });
 
-    sock.ev.on('groups.update', async (updates) => {
-      await this.webhookService.fire('groups.update', sessionId, updates);
+    sock.ev.on("groups.update", async (updates) => {
+      await this.webhookService.fire("groups.update", sessionId, updates);
     });
 
-    sock.ev.on('group-participants.update', async (update) => {
-      await this.webhookService.fire('group.participants.update', sessionId, update);
+    sock.ev.on("group-participants.update", async (update) => {
+      await this.webhookService.fire(
+        "group.participants.update",
+        sessionId,
+        update,
+      );
     });
 
-    sock.ev.on('contacts.update', async (updates) => {
-      await this.webhookService.fire('contacts.update', sessionId, updates);
+    sock.ev.on("contacts.update", async (updates) => {
+      await this.webhookService.fire("contacts.update", sessionId, updates);
     });
 
-    sock.ev.on('call', async (calls) => {
-      await this.webhookService.fire('call', sessionId, calls);
+    sock.ev.on("call", async (calls) => {
+      await this.webhookService.fire("call", sessionId, calls);
     });
   }
 
@@ -455,7 +545,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
 
   private async handleConnectionUpdate(
     sessionId: string,
-    update: Partial<BaileysEventMap['connection.update']>,
+    update: Partial<BaileysEventMap["connection.update"]>,
   ) {
     const { connection, lastDisconnect, qr } = update;
     const info = this.sessionInfo.get(sessionId);
@@ -468,12 +558,12 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       this.qrMeta.set(sessionId, { generatedAt });
       this.sessionInfo.set(sessionId, {
         ...info,
-        status: 'qr_ready',
+        status: "qr_ready",
         qrCode: qrBase64,
         qrExpiresAt: new Date(generatedAt.getTime() + 60_000),
       });
 
-      await this.webhookService.fire('session.qr', sessionId, {
+      await this.webhookService.fire("session.qr", sessionId, {
         qrCode: qrBase64,
         qrString: qr,
       });
@@ -482,25 +572,25 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     }
 
     // Successfully connected
-    if (connection === 'open') {
+    if (connection === "open") {
       const sock = this.sessions.get(sessionId);
       const user = sock?.user;
 
       this.qrMeta.delete(sessionId);
       this.sessionInfo.set(sessionId, {
         ...info,
-        status: 'connected',
+        status: "connected",
         qrCode: undefined,
         qrExpiresAt: undefined,
-        phoneNumber: user?.id?.split(':')[0],
+        phoneNumber: user?.id?.split(":")[0],
         name: user?.name,
         connectedAt: new Date(),
         retryCount: 0,
         lastDisconnectReason: null,
       });
 
-      await this.webhookService.fire('session.connected', sessionId, {
-        phoneNumber: user?.id?.split(':')[0],
+      await this.webhookService.fire("session.connected", sessionId, {
+        phoneNumber: user?.id?.split(":")[0],
         name: user?.name,
       });
 
@@ -508,52 +598,67 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     }
 
     // Disconnected
-    if (connection === 'close') {
+    if (connection === "close") {
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
       const rawReason: string =
-        (lastDisconnect?.error as any)?.output?.payload?.error ?? String(statusCode ?? 'unknown');
+        (lastDisconnect?.error as any)?.output?.payload?.error ??
+        String(statusCode ?? "unknown");
       const safeReason = sanitiseReason(rawReason);
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-      console.log(`[${sessionId}] Disconnected — code: ${statusCode}, reason: ${rawReason}`);
+      console.log(
+        `[${sessionId}] Disconnected — code: ${statusCode}, reason: ${rawReason}`,
+      );
 
       if (isLoggedOut) {
         // User explicitly logged out — don't reconnect, clean up
-        this.sessionInfo.set(sessionId, { ...info, status: 'logged_out', lastDisconnectReason: safeReason });
-        await this.webhookService.fire('session.logged_out', sessionId, {});
+        this.sessionInfo.set(sessionId, {
+          ...info,
+          status: "logged_out",
+          lastDisconnectReason: safeReason,
+        });
+        await this.webhookService.fire("session.logged_out", sessionId, {});
         this.sessions.delete(sessionId);
         return;
       }
 
       const newRetryCount = (info.retryCount ?? 0) + 1;
-      const isAuthFailure = statusCode === 401 || statusCode === 405
-        || rawReason === 'loggedOut' || rawReason === 'badSession';
-      const maxAttempts = parseInt(process.env.MAX_RECONNECT_ATTEMPTS ?? '5', 10);
+      const isAuthFailure =
+        statusCode === 401 ||
+        statusCode === 405 ||
+        rawReason === "loggedOut" ||
+        rawReason === "badSession";
+      const maxAttempts = parseInt(
+        process.env.MAX_RECONNECT_ATTEMPTS ?? "5",
+        10,
+      );
 
       if (isAuthFailure || newRetryCount >= maxAttempts) {
         this.sessionInfo.set(sessionId, {
           ...info,
-          status: 'failed',
+          status: "failed",
           lastDisconnectReason: safeReason,
           retryCount: newRetryCount,
         });
-        await this.webhookService.fire('session.failed', sessionId, {
+        await this.webhookService.fire("session.failed", sessionId, {
           sessionId,
           reason: safeReason,
           retryCount: newRetryCount,
         });
-        console.error(`[${sessionId}] Session failed — reason: ${rawReason}, retryCount: ${newRetryCount}`);
+        console.error(
+          `[${sessionId}] Session failed — reason: ${rawReason}, retryCount: ${newRetryCount}`,
+        );
         return;
       }
 
       // Network issue, WA update, etc. — reconnect with backoff
       this.sessionInfo.set(sessionId, {
         ...info,
-        status: 'disconnected',
+        status: "disconnected",
         lastDisconnectReason: safeReason,
         retryCount: newRetryCount,
       });
-      await this.webhookService.fire('session.disconnected', sessionId, {
+      await this.webhookService.fire("session.disconnected", sessionId, {
         reason: safeReason,
       });
 
@@ -573,9 +678,9 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
 
   private async handleIncomingMessages(
     sessionId: string,
-    { messages, type }: BaileysEventMap['messages.upsert'],
+    { messages, type }: BaileysEventMap["messages.upsert"],
   ) {
-    if (type !== 'notify') return; // ignore history sync
+    if (type !== "notify") return; // ignore history sync
 
     for (const msg of messages) {
       if (msg.key.fromMe) continue; // ignore own messages
@@ -583,7 +688,8 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       // Cache message for quoted reply support
       this.cacheMessage(sessionId, msg);
 
-      const config = this.sessionConfigs.get(sessionId) ?? SESSION_CONFIG_DEFAULTS;
+      const config =
+        this.sessionConfigs.get(sessionId) ?? SESSION_CONFIG_DEFAULTS;
 
       if (!config.receive_enabled) continue; // early exit — webhook not fired
 
@@ -606,14 +712,14 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       // sender-key distribution) — they leak in when sending media and otherwise
       // show up as an empty "associatedChildMessage" bubble.
       if (
-        contentType === 'associatedChildMessage' ||
-        contentType === 'senderKeyDistributionMessage' ||
-        contentType === 'protocolMessage' ||
-        contentType === 'messageContextInfo'
+        contentType === "associatedChildMessage" ||
+        contentType === "senderKeyDistributionMessage" ||
+        contentType === "protocolMessage" ||
+        contentType === "messageContextInfo"
       ) {
         continue;
       }
-      const isGroup = msg.key.remoteJid?.endsWith('@g.us');
+      const isGroup = msg.key.remoteJid?.endsWith("@g.us");
 
       // LID addressing: remoteJid may be an opaque "<id>@lid". The real phone
       // number (PN) is on key.senderPn. Forward both so the dashboard resolves
@@ -624,7 +730,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       };
       const senderPn = lidKey.senderPn ?? null;
 
-      const senderJid = senderPn ?? msg.key.remoteJid ?? '';
+      const senderJid = senderPn ?? msg.key.remoteJid ?? "";
       const avatarUrl = await this.getAvatarUrl(sessionId, senderJid);
 
       const basePayload = {
@@ -634,7 +740,9 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
         // canonical phone-number JID (falls back to remoteJid when not @lid)
         senderJid,
         senderPn,
-        senderLid: lidKey.senderLid ?? (msg.key.remoteJid?.endsWith('@lid') ? msg.key.remoteJid : null),
+        senderLid:
+          lidKey.senderLid ??
+          (msg.key.remoteJid?.endsWith("@lid") ? msg.key.remoteJid : null),
         avatarUrl,
         isGroup,
         timestamp: msg.messageTimestamp,
@@ -644,82 +752,103 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       // Extract message content by type
       let content: any = {};
 
-      if (contentType === 'conversation' || contentType === 'extendedTextMessage') {
-        content.text = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
-      } else if (contentType === 'imageMessage') {
+      if (
+        contentType === "conversation" ||
+        contentType === "extendedTextMessage"
+      ) {
+        content.text =
+          msg.message?.conversation || msg.message?.extendedTextMessage?.text;
+      } else if (contentType === "imageMessage") {
         content.caption = msg.message?.imageMessage?.caption;
         content.mimetype = msg.message?.imageMessage?.mimetype;
         content.mediaKey = msg.message?.imageMessage?.mediaKey;
-      } else if (contentType === 'videoMessage') {
+      } else if (contentType === "videoMessage") {
         content.caption = msg.message?.videoMessage?.caption;
         content.mimetype = msg.message?.videoMessage?.mimetype;
-      } else if (contentType === 'audioMessage') {
+      } else if (contentType === "audioMessage") {
         content.isVoiceNote = msg.message?.audioMessage?.ptt;
         content.mimetype = msg.message?.audioMessage?.mimetype;
         content.seconds = msg.message?.audioMessage?.seconds;
-      } else if (contentType === 'documentMessage') {
+      } else if (contentType === "documentMessage") {
         content.fileName = msg.message?.documentMessage?.fileName;
         content.mimetype = msg.message?.documentMessage?.mimetype;
         content.pageCount = msg.message?.documentMessage?.pageCount;
-      } else if (contentType === 'locationMessage') {
+      } else if (contentType === "locationMessage") {
         content.latitude = msg.message?.locationMessage?.degreesLatitude;
         content.longitude = msg.message?.locationMessage?.degreesLongitude;
         content.name = msg.message?.locationMessage?.name;
         content.address = msg.message?.locationMessage?.address;
-      } else if (contentType === 'contactMessage') {
+      } else if (contentType === "contactMessage") {
         content.displayName = msg.message?.contactMessage?.displayName;
         content.vcard = msg.message?.contactMessage?.vcard;
-      } else if (contentType === 'stickerMessage') {
+      } else if (contentType === "stickerMessage") {
         content.isAnimated = msg.message?.stickerMessage?.isAnimated;
-      } else if (contentType === 'pollCreationMessage') {
+      } else if (contentType === "pollCreationMessage") {
         content.name = msg.message?.pollCreationMessage?.name;
-        content.options = msg.message?.pollCreationMessage?.options?.map((o) => o.optionName);
-      } else if (contentType === 'reactionMessage') {
+        content.options = msg.message?.pollCreationMessage?.options?.map(
+          (o) => o.optionName,
+        );
+      } else if (contentType === "reactionMessage") {
         content.reaction = msg.message?.reactionMessage?.text;
         content.replyMessageId = msg.message?.reactionMessage?.key?.id;
-      } else if (contentType === 'buttonsResponseMessage') {
+      } else if (contentType === "buttonsResponseMessage") {
         // Customer tapped a reply button — expose both the visible text AND the
         // stable button id (for automation/webhook routing).
         content.text = msg.message?.buttonsResponseMessage?.selectedDisplayText;
-        content.selectionId = msg.message?.buttonsResponseMessage?.selectedButtonId;
-        content.interactiveKind = 'button_reply';
-      } else if (contentType === 'listResponseMessage') {
+        content.selectionId =
+          msg.message?.buttonsResponseMessage?.selectedButtonId;
+        content.interactiveKind = "button_reply";
+      } else if (contentType === "listResponseMessage") {
         const lr = msg.message?.listResponseMessage;
         content.text = lr?.title;
         content.selectionId = lr?.singleSelectReply?.selectedRowId;
         content.selectionDescription = lr?.description;
-        content.interactiveKind = 'list_reply';
-      } else if (contentType === 'templateButtonReplyMessage') {
-        content.text = msg.message?.templateButtonReplyMessage?.selectedDisplayText;
-        content.selectionId = msg.message?.templateButtonReplyMessage?.selectedId;
-        content.interactiveKind = 'quick_reply';
+        content.interactiveKind = "list_reply";
+      } else if (contentType === "templateButtonReplyMessage") {
+        content.text =
+          msg.message?.templateButtonReplyMessage?.selectedDisplayText;
+        content.selectionId =
+          msg.message?.templateButtonReplyMessage?.selectedId;
+        content.interactiveKind = "quick_reply";
       }
 
       // Interactive replies render as plain text in the inbox; map their type so
       // the thread/ingest treat them like a normal text message.
-      const INTERACTIVE_REPLY = ['buttonsResponseMessage', 'listResponseMessage', 'templateButtonReplyMessage'];
-      const outType = INTERACTIVE_REPLY.includes(contentType) ? 'conversation' : contentType;
+      const INTERACTIVE_REPLY = [
+        "buttonsResponseMessage",
+        "listResponseMessage",
+        "templateButtonReplyMessage",
+      ];
+      const outType = INTERACTIVE_REPLY.includes(contentType)
+        ? "conversation"
+        : contentType;
 
       // Download media (image/sticker/video/voice/audio/document) inline so the
       // inbox can show or play it.
       if (
-        contentType === 'imageMessage' ||
-        contentType === 'stickerMessage' ||
-        contentType === 'videoMessage' ||
-        contentType === 'audioMessage' ||
-        contentType === 'documentMessage'
+        contentType === "imageMessage" ||
+        contentType === "stickerMessage" ||
+        contentType === "videoMessage" ||
+        contentType === "audioMessage" ||
+        contentType === "documentMessage"
       ) {
-        const dataUri = await this.downloadInboundMedia(sessionId, msg, contentType);
+        const dataUri = await this.downloadInboundMedia(
+          sessionId,
+          msg,
+          contentType,
+        );
         if (dataUri) content.dataUri = dataUri;
       }
 
       // Check if it's a reply/quoted message
-      const quotedMsg = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+      const quotedMsg =
+        msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
       if (quotedMsg) {
-        content.quotedMessageId = msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
+        content.quotedMessageId =
+          msg.message?.extendedTextMessage?.contextInfo?.stanzaId;
       }
 
-      await this.webhookService.fire('message.received', sessionId, {
+      await this.webhookService.fire("message.received", sessionId, {
         ...basePayload,
         type: outType,
         content,
@@ -733,7 +862,10 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
    * with a TTL. Returns null when the contact has no picture or it is private.
    * Never throws — avatars are non-critical and must not block ingestion.
    */
-  private async getAvatarUrl(sessionId: string, jid: string): Promise<string | null> {
+  private async getAvatarUrl(
+    sessionId: string,
+    jid: string,
+  ): Promise<string | null> {
     if (!jid) return null;
     const cacheKey = `${sessionId}:${jid}`;
     const hit = this.avatarCache.get(cacheKey);
@@ -744,7 +876,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
 
     let url: string | null = null;
     try {
-      url = (await sock.profilePictureUrl(jid, 'image')) ?? null;
+      url = (await sock.profilePictureUrl(jid, "image")) ?? null;
     } catch {
       url = null; // 404 (no pic) / 401 (private) / rate-limited
     }
@@ -767,34 +899,48 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       if (!sock) return null;
       const m = msg.message;
       const media =
-        type === 'imageMessage' ? m?.imageMessage
-        : type === 'stickerMessage' ? m?.stickerMessage
-        : type === 'videoMessage' ? m?.videoMessage
-        : type === 'audioMessage' ? m?.audioMessage
-        : type === 'documentMessage' ? m?.documentMessage
-        : null;
+        type === "imageMessage"
+          ? m?.imageMessage
+          : type === "stickerMessage"
+            ? m?.stickerMessage
+            : type === "videoMessage"
+              ? m?.videoMessage
+              : type === "audioMessage"
+                ? m?.audioMessage
+                : type === "documentMessage"
+                  ? m?.documentMessage
+                  : null;
       if (!media) return null;
-      const declared = Number((media as { fileLength?: number | Long }).fileLength ?? 0);
+      const declared = Number(
+        (media as { fileLength?: number | Long }).fileLength ?? 0,
+      );
       if (declared && declared > CAP) return null; // skip large files
 
+      if (!msg.key) return null;
       const buffer = (await downloadMediaMessage(
-        msg,
-        'buffer',
+        msg as WAMessage,
+        "buffer",
         {},
         { logger: console as never, reuploadRequest: sock.updateMediaMessage },
       )) as Buffer;
       if (!buffer || buffer.length > CAP) return null;
 
       const fallback =
-        type === 'stickerMessage' ? 'image/webp'
-        : type === 'videoMessage' ? 'video/mp4'
-        : type === 'audioMessage' ? 'audio/ogg'
-        : type === 'documentMessage' ? 'application/octet-stream'
-        : 'image/jpeg';
+        type === "stickerMessage"
+          ? "image/webp"
+          : type === "videoMessage"c
+            ? "video/mp4"
+            : type === "audioMessage"
+              ? "audio/ogg"
+              : type === "documentMessage"
+                ? "application/octet-stream"
+                : "image/jpeg";
       const mime = (media as { mimetype?: string }).mimetype || fallback;
-      return `data:${mime};base64,${buffer.toString('base64')}`;
+      return `data:${mime};base64,${buffer.toString("base64")}`;
     } catch (err) {
-      console.warn(`[Media] download failed session=${sessionId} type=${type}: ${String(err)}`);
+      console.warn(
+        `[Media] download failed session=${sessionId} type=${type}: ${String(err)}`,
+      );
       return null;
     }
   }
@@ -805,7 +951,10 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
    * option names. Best-effort: poll decryption is fragile (needs the original
    * poll's secret in cache), so any failure is logged and swallowed.
    */
-  private async handlePollVote(sessionId: string, msg: proto.IWebMessageInfo): Promise<void> {
+  private async handlePollVote(
+    sessionId: string,
+    msg: proto.IWebMessageInfo,
+  ): Promise<void> {
     try {
       const update = msg.message?.pollUpdateMessage;
       const creationKey = update?.pollCreationMessageKey;
@@ -821,23 +970,29 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       if (!pollContent || !encKey) return; // poll not in cache — cannot decrypt
 
       const sock = this.sessions.get(sessionId);
-      const meId = sock?.user?.id ? jidNormalizedUser(sock.user.id) : '';
+      const meId = sock?.user?.id ? jidNormalizedUser(sock.user.id) : "";
       const myLid = (sock?.user as { lid?: string } | undefined)?.lid;
-      const meLid = myLid ? jidNormalizedUser(myLid) : '';
+      const meLid = myLid ? jidNormalizedUser(myLid) : "";
 
       // Voter + creator can each be addressed by LID or phone-number (PN).
       // Per Baileys issue #2342 the winning combo for current WhatsApp is
       // creator=LID + voter=PN, so we list those first.
       const vk = msg.key as typeof msg.key & { senderPn?: string | null };
-      const voterPn = vk.senderPn ? jidNormalizedUser(vk.senderPn) : '';
-      const voterLid = msg.key.remoteJid?.endsWith('@lid')
+      const voterPn = vk.senderPn ? jidNormalizedUser(vk.senderPn) : "";
+      const voterLid = msg.key.remoteJid?.endsWith("@lid")
         ? jidNormalizedUser(msg.key.remoteJid)
-        : '';
+        : "";
 
       const pollFromMe = cachedPoll?.key?.fromMe ?? false;
       const creators = pollFromMe
         ? [...new Set([meLid, meId].filter(Boolean))] // we created the poll
-        : [...new Set([voterLid, voterPn, getKeyAuthor(creationKey, meId)].filter(Boolean))];
+        : [
+            ...new Set(
+              [voterLid, voterPn, getKeyAuthor(creationKey, meId)].filter(
+                Boolean,
+              ),
+            ),
+          ];
       const voters = [...new Set([voterPn, voterLid].filter(Boolean))];
 
       let voteMsg: ReturnType<typeof decryptPollVote> | undefined;
@@ -851,7 +1006,9 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
               pollMsgId: creationKey.id,
               voterJid,
             });
-            console.log(`[PollVote] OK creator=${pollCreatorJid} voter=${voterJid}`);
+            console.log(
+              `[PollVote] OK creator=${pollCreatorJid} voter=${voterJid}`,
+            );
             break outer;
           } catch (e) {
             lastErr = e;
@@ -861,7 +1018,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       if (!voteMsg) {
         console.warn(
           `[PollVote] all combos failed session=${sessionId} ` +
-            `meId=${meId} meLid=${meLid || '(none)'} encKey=${encKey ? 'yes' : 'NO'} ` +
+            `meId=${meId} meLid=${meLid || "(none)"} encKey=${encKey ? "yes" : "NO"} ` +
             `creators=${JSON.stringify(creators)} voters=${JSON.stringify(voters)} ` +
             `creationKey=${JSON.stringify({ id: creationKey.id, fromMe: creationKey.fromMe, participant: creationKey.participant, remoteJid: creationKey.remoteJid })} ` +
             `err=${String(lastErr)}`,
@@ -870,49 +1027,66 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       }
 
       const aggregated = getAggregateVotesInPollMessage(
-        { message: pollContent, pollUpdates: [{ pollUpdateMessageKey: msg.key, vote: voteMsg }] },
+        {
+          message: pollContent,
+          pollUpdates: [{ pollUpdateMessageKey: msg.key, vote: voteMsg }],
+        },
         meId,
       );
-      const selected = aggregated.filter((a) => a.voters.length > 0).map((a) => a.name);
+      const selected = aggregated
+        .filter((a) => a.voters.length > 0)
+        .map((a) => a.name);
 
       const displaySenderPn = vk.senderPn ?? null;
-      const displayJid = displaySenderPn ?? msg.key.remoteJid ?? '';
+      const displayJid = displaySenderPn ?? msg.key.remoteJid ?? "";
 
-      await this.webhookService.fire('message.received', sessionId, {
+      await this.webhookService.fire("message.received", sessionId, {
         messageId: msg.key.id,
         from: msg.key.remoteJid,
         sender: msg.key.participant || msg.key.remoteJid,
         senderJid: displayJid,
         senderPn: displaySenderPn,
-        senderLid: msg.key.remoteJid?.endsWith('@lid') ? msg.key.remoteJid : null,
+        senderLid: msg.key.remoteJid?.endsWith("@lid")
+          ? msg.key.remoteJid
+          : null,
         avatarUrl: await this.getAvatarUrl(sessionId, displayJid),
         isGroup: false,
         timestamp: msg.messageTimestamp,
-        type: 'poll_vote',
+        type: "poll_vote",
         content: {
           pollMessageId: creationKey.id,
-          pollName: pollContent.pollCreationMessage?.name ?? pollContent.pollCreationMessageV3?.name,
+          pollName:
+            pollContent.pollCreationMessage?.name ??
+            pollContent.pollCreationMessageV3?.name,
           selectedOptions: selected,
-          text: selected.length ? `🗳️ Voted: ${selected.join(', ')}` : '🗳️ Cleared their vote',
+          text: selected.length
+            ? `🗳️ Voted: ${selected.join(", ")}`
+            : "🗳️ Cleared their vote",
         },
         message: sanitizeMessage(msg),
       });
 
       // Dedicated, integration-friendly event so order-confirmation flows
       // (Shopify/Woo, PRD §2.3) can subscribe to votes only — not all messages.
-      await this.webhookService.fire('poll.vote', sessionId, {
+      await this.webhookService.fire("poll.vote", sessionId, {
         pollMessageId: creationKey.id,
-        pollName: pollContent.pollCreationMessage?.name ?? pollContent.pollCreationMessageV3?.name,
+        pollName:
+          pollContent.pollCreationMessage?.name ??
+          pollContent.pollCreationMessageV3?.name,
         selectedOptions: selected,
         voter: {
           jid: displayJid,
-          phone: (displaySenderPn ?? msg.key.remoteJid ?? '').split('@')[0].replace(/[^0-9]/g, ''),
+          phone: (displaySenderPn ?? msg.key.remoteJid ?? "")
+            .split("@")[0]
+            .replace(/[^0-9]/g, ""),
         },
         messageId: msg.key.id,
         timestamp: msg.messageTimestamp,
       });
     } catch (err) {
-      console.warn(`[PollVote] decode failed session=${sessionId}: ${String(err)}`);
+      console.warn(
+        `[PollVote] decode failed session=${sessionId}: ${String(err)}`,
+      );
     }
   }
 
@@ -926,7 +1100,9 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
 
     for (const sessionId of sessionDirs) {
       if (!SESSION_ID_RE.test(sessionId)) {
-        console.warn(`[Restore] Skipping invalid session directory: ${sessionId}`);
+        console.warn(
+          `[Restore] Skipping invalid session directory: ${sessionId}`,
+        );
         continue;
       }
 
@@ -934,7 +1110,9 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       try {
         sessionPath = this.resolveSessionPath(sessionId);
       } catch {
-        console.warn(`[Restore] Skipping invalid session directory: ${sessionId}`);
+        console.warn(
+          `[Restore] Skipping invalid session directory: ${sessionId}`,
+        );
         continue;
       }
 
@@ -942,42 +1120,50 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       if (!fs.lstatSync(sessionPath).isDirectory()) continue;
 
       // Only restore if creds file exists (means it was authenticated before)
-      const credsFile = path.join(sessionPath, 'creds.json');
+      const credsFile = path.join(sessionPath, "creds.json");
       if (!fs.existsSync(credsFile)) continue;
 
       // Reject symlinked creds.json — protects shared-host deployments from
       // arbitrary file reads via crafted symlinks inside the sessions directory
       if (fs.lstatSync(credsFile).isSymbolicLink()) {
-        console.warn(`[Restore] Skipping ${sessionId} — symlinked creds.json rejected`);
+        console.warn(
+          `[Restore] Skipping ${sessionId} — symlinked creds.json rejected`,
+        );
         continue;
       }
 
       // Read proxy.json if present — same symlink guard as creds.json
       let restoredProxy: string | undefined;
-      const proxyFile = path.join(sessionPath, 'proxy.json');
+      const proxyFile = path.join(sessionPath, "proxy.json");
       if (fs.existsSync(proxyFile)) {
         if (fs.lstatSync(proxyFile).isSymbolicLink()) {
-          console.warn(`[Restore] Skipping ${sessionId} — symlinked proxy.json rejected`);
+          console.warn(
+            `[Restore] Skipping ${sessionId} — symlinked proxy.json rejected`,
+          );
           continue;
         }
         try {
-          const raw = JSON.parse(fs.readFileSync(proxyFile, 'utf8'));
-          if (typeof raw.proxy === 'string') restoredProxy = raw.proxy;
+          const raw = JSON.parse(fs.readFileSync(proxyFile, "utf8"));
+          if (typeof raw.proxy === "string") restoredProxy = raw.proxy;
         } catch {
-          console.warn(`[Restore] ${sessionId} — malformed proxy.json, restoring without proxy`);
+          console.warn(
+            `[Restore] ${sessionId} — malformed proxy.json, restoring without proxy`,
+          );
         }
       }
 
       // Read config.json if present — same symlink guard as creds.json and proxy.json
       let restoredConfig: SessionConfig;
-      const configFile = path.join(sessionPath, 'config.json');
+      const configFile = path.join(sessionPath, "config.json");
       if (fs.existsSync(configFile)) {
         if (fs.lstatSync(configFile).isSymbolicLink()) {
-          console.warn(`[Restore] Skipping ${sessionId} — symlinked config.json rejected`);
+          console.warn(
+            `[Restore] Skipping ${sessionId} — symlinked config.json rejected`,
+          );
           continue;
         }
         try {
-          const raw = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+          const raw = JSON.parse(fs.readFileSync(configFile, "utf8"));
           restoredConfig = { ...SESSION_CONFIG_DEFAULTS, ...raw };
         } catch {
           console.warn(`[${sessionId}] Malformed config.json — using defaults`);
@@ -988,18 +1174,22 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       }
       this.sessionConfigs.set(sessionId, restoredConfig);
 
-      console.log(`[Restore] Restoring session: ${sessionId}${restoredProxy ? ` (proxy: ${restoredProxy})` : ''}`);
+      console.log(
+        `[Restore] Restoring session: ${sessionId}${restoredProxy ? ` (proxy: ${restoredProxy})` : ""}`,
+      );
       this.sessionInfo.set(sessionId, {
         id: sessionId,
-        status: 'connecting',
+        status: "connecting",
         retryCount: 0,
         lastDisconnectReason: null,
         proxy: restoredProxy,
         config: restoredConfig,
       });
 
-      this.initSocket(sessionId, restoredProxy).catch(err =>
-        console.error(`[Restore] Failed to init session ${sessionId}: ${err.message}`)
+      this.initSocket(sessionId, restoredProxy).catch((err) =>
+        console.error(
+          `[Restore] Failed to init session ${sessionId}: ${err.message}`,
+        ),
       );
     }
   }
@@ -1024,7 +1214,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     }
 
     const result = await sock.sendMessage(jid, { text }, options);
-    return { messageId: result?.key?.id, status: 'sent' };
+    return { messageId: result?.key?.id, status: "sent" };
   }
 
   async sendImage(
@@ -1039,9 +1229,9 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     const imageBuffer = await resolveMediaBuffer(imageUrl, 10 * 1024 * 1024);
     const result = await sock.sendMessage(jid, {
       image: imageBuffer,
-      caption: caption || '',
+      caption: caption || "",
     });
-    return { messageId: result?.key?.id, status: 'sent' };
+    return { messageId: result?.key?.id, status: "sent" };
   }
 
   async sendVideo(
@@ -1056,9 +1246,9 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     const videoBuffer = await resolveMediaBuffer(videoUrl, 100 * 1024 * 1024);
     const result = await sock.sendMessage(jid, {
       video: videoBuffer,
-      caption: caption || '',
+      caption: caption || "",
     });
-    return { messageId: result?.key?.id, status: 'sent' };
+    return { messageId: result?.key?.id, status: "sent" };
   }
 
   async sendAudio(
@@ -1076,7 +1266,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       mimetype: this.audioMimetype(audioUrl, isVoiceNote),
       ptt: isVoiceNote,
     });
-    return { messageId: result?.key?.id, status: 'sent' };
+    return { messageId: result?.key?.id, status: "sent" };
   }
 
   async sendDocument(
@@ -1095,18 +1285,25 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       fileName,
       mimetype,
     });
-    return { messageId: result?.key?.id, status: 'sent' };
+    return { messageId: result?.key?.id, status: "sent" };
   }
 
-  async sendSticker(sessionId: string, to: string, stickerUrl: string): Promise<SendResult> {
+  async sendSticker(
+    sessionId: string,
+    to: string,
+    stickerUrl: string,
+  ): Promise<SendResult> {
     const sock = this.getSocket(sessionId);
     await this.applyRandomDelay(sessionId);
     const jid = this.toJid(to);
-    const stickerBuffer = await resolveMediaBuffer(stickerUrl, 10 * 1024 * 1024);
+    const stickerBuffer = await resolveMediaBuffer(
+      stickerUrl,
+      10 * 1024 * 1024,
+    );
     const result = await sock.sendMessage(jid, {
       sticker: stickerBuffer,
     });
-    return { messageId: result?.key?.id, status: 'sent' };
+    return { messageId: result?.key?.id, status: "sent" };
   }
 
   async sendLocation(
@@ -1124,11 +1321,11 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       location: {
         degreesLatitude: latitude,
         degreesLongitude: longitude,
-        name: name || '',
-        address: address || '',
+        name: name || "",
+        address: address || "",
       },
     });
-    return { messageId: result?.key?.id, status: 'sent' };
+    return { messageId: result?.key?.id, status: "sent" };
   }
 
   async sendContact(
@@ -1140,16 +1337,15 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     const sock = this.getSocket(sessionId);
     await this.applyRandomDelay(sessionId);
     const jid = this.toJid(to);
-    const normalizedPhone = phoneNumber.replace(/^\+/, '');
-    const vcard =
-      `BEGIN:VCARD\nVERSION:3.0\nFN:${displayName}\nTEL;type=CELL;type=VOICE;waid=${normalizedPhone}:+${normalizedPhone}\nEND:VCARD`;
+    const normalizedPhone = phoneNumber.replace(/^\+/, "");
+    const vcard = `BEGIN:VCARD\nVERSION:3.0\nFN:${displayName}\nTEL;type=CELL;type=VOICE;waid=${normalizedPhone}:+${normalizedPhone}\nEND:VCARD`;
     const result = await sock.sendMessage(jid, {
       contacts: {
         displayName,
         contacts: [{ displayName, vcard }],
       },
     });
-    return { messageId: result?.key?.id, status: 'sent' };
+    return { messageId: result?.key?.id, status: "sent" };
   }
 
   async sendButtons(
@@ -1172,7 +1368,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       })),
       headerType: 1,
     } as any);
-    return { messageId: result?.key?.id, status: 'sent' };
+    return { messageId: result?.key?.id, status: "sent" };
   }
 
   async sendList(
@@ -1181,7 +1377,10 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     title: string,
     text: string,
     buttonText: string,
-    sections: { title: string; rows: { id: string; title: string; description?: string }[] }[],
+    sections: {
+      title: string;
+      rows: { id: string; title: string; description?: string }[];
+    }[],
   ): Promise<SendResult> {
     const sock = this.getSocket(sessionId);
     await this.applyRandomDelay(sessionId);
@@ -1189,12 +1388,12 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     const result = await sock.sendMessage(jid, {
       text,
       title,
-      footer: '',
+      footer: "",
       buttonText,
       sections,
       listType: 1,
     } as any);
-    return { messageId: result?.key?.id, status: 'sent' };
+    return { messageId: result?.key?.id, status: "sent" };
   }
 
   async sendPoll(
@@ -1214,7 +1413,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
         selectableCount,
       },
     });
-    return { messageId: result?.key?.id, status: 'sent' };
+    return { messageId: result?.key?.id, status: "sent" };
   }
 
   async sendReaction(
@@ -1236,7 +1435,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
         key: { remoteJid: jid, id: messageId, fromMe: fromMe ?? false },
       },
     });
-    return { messageId: result?.key?.id, status: 'sent' };
+    return { messageId: result?.key?.id, status: "sent" };
   }
 
   async sendGif(
@@ -1252,10 +1451,10 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     const gifBuffer = await resolveMediaBuffer(gifUrl, 100 * 1024 * 1024);
     const result = await sock.sendMessage(jid, {
       video: gifBuffer,
-      caption: caption || '',
+      caption: caption || "",
       gifPlayback: true,
     });
-    return { messageId: result?.key?.id, status: 'sent' };
+    return { messageId: result?.key?.id, status: "sent" };
   }
 
   async sendViewOnce(
@@ -1270,10 +1469,10 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     const viewOnceBuffer = await resolveMediaBuffer(imageUrl, 10 * 1024 * 1024);
     const result = await sock.sendMessage(jid, {
       image: viewOnceBuffer,
-      caption: caption || '',
+      caption: caption || "",
       viewOnce: true,
     });
-    return { messageId: result?.key?.id, status: 'sent' };
+    return { messageId: result?.key?.id, status: "sent" };
   }
 
   async editMessage(
@@ -1288,7 +1487,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       edit: { remoteJid: jid, id: messageId, fromMe: true },
       text: newText,
     } as any);
-    return { messageId: result?.key?.id, status: 'edited' };
+    return { messageId: result?.key?.id, status: "edited" };
   }
 
   async deleteMessage(
@@ -1302,7 +1501,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     await sock.sendMessage(jid, {
       delete: { remoteJid: jid, id: messageId, fromMe: true },
     });
-    return { status: 'deleted' };
+    return { status: "deleted" };
   }
 
   async markRead(
@@ -1315,7 +1514,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     await sock.readMessages(
       messageIds.map((id) => ({ remoteJid: jid, id, fromMe: false })),
     );
-    return { status: 'read' };
+    return { status: "read" };
   }
 
   // ─── Messaging: presence ────────────────────────────────────────────────
@@ -1327,10 +1526,10 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
   ): Promise<{ status: string }> {
     const sock = this.getSocket(sessionId);
     const jid = isGroup ? this.toGroupJid(to) : this.toJid(to);
-    await sock.sendPresenceUpdate('composing', jid);
+    await sock.sendPresenceUpdate("composing", jid);
     // Auto-clear after 3 seconds
-    setTimeout(() => sock.sendPresenceUpdate('paused', jid), 3000);
-    return { status: 'typing' };
+    setTimeout(() => sock.sendPresenceUpdate("paused", jid), 3000);
+    return { status: "typing" };
   }
 
   async sendPresence(
@@ -1395,7 +1594,9 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     imageUrl: string,
   ): Promise<{ success: boolean }> {
     const sock = this.getSocket(sessionId);
-    const buffer = await safeFetch(imageUrl, { maxBytes: 5 * 1024 * 1024 }).then((r) => r.buffer());
+    const buffer = await safeFetch(imageUrl, {
+      maxBytes: 5 * 1024 * 1024,
+    }).then((r) => r.buffer());
     await sock.updateProfilePicture(this.toGroupJid(groupId), buffer);
     return { success: true };
   }
@@ -1407,7 +1608,11 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
   ): Promise<{ success: boolean; result: unknown }> {
     const sock = this.getSocket(sessionId);
     const jids = participants.map((p) => this.toJid(p));
-    const result = await sock.groupParticipantsUpdate(this.toGroupJid(groupId), jids, 'add');
+    const result = await sock.groupParticipantsUpdate(
+      this.toGroupJid(groupId),
+      jids,
+      "add",
+    );
     return { success: true, result };
   }
 
@@ -1418,7 +1623,11 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
   ): Promise<{ success: boolean; result: unknown }> {
     const sock = this.getSocket(sessionId);
     const jids = participants.map((p) => this.toJid(p));
-    const result = await sock.groupParticipantsUpdate(this.toGroupJid(groupId), jids, 'remove');
+    const result = await sock.groupParticipantsUpdate(
+      this.toGroupJid(groupId),
+      jids,
+      "remove",
+    );
     return { success: true, result };
   }
 
@@ -1429,7 +1638,11 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
   ): Promise<{ success: boolean; result: unknown }> {
     const sock = this.getSocket(sessionId);
     const jids = participants.map((p) => this.toJid(p));
-    const result = await sock.groupParticipantsUpdate(this.toGroupJid(groupId), jids, 'promote');
+    const result = await sock.groupParticipantsUpdate(
+      this.toGroupJid(groupId),
+      jids,
+      "promote",
+    );
     return { success: true, result };
   }
 
@@ -1440,11 +1653,18 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
   ): Promise<{ success: boolean; result: unknown }> {
     const sock = this.getSocket(sessionId);
     const jids = participants.map((p) => this.toJid(p));
-    const result = await sock.groupParticipantsUpdate(this.toGroupJid(groupId), jids, 'demote');
+    const result = await sock.groupParticipantsUpdate(
+      this.toGroupJid(groupId),
+      jids,
+      "demote",
+    );
     return { success: true, result };
   }
 
-  async leaveGroup(sessionId: string, groupId: string): Promise<{ success: boolean }> {
+  async leaveGroup(
+    sessionId: string,
+    groupId: string,
+  ): Promise<{ success: boolean }> {
     const sock = this.getSocket(sessionId);
     await sock.groupLeave(this.toGroupJid(groupId));
     return { success: true };
@@ -1474,15 +1694,15 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
   ): Promise<{ success: boolean; groupId: string }> {
     const sock = this.getSocket(sessionId);
     // Extract code from full URL if needed
-    const code = inviteCode.includes('chat.whatsapp.com/')
-      ? inviteCode.split('chat.whatsapp.com/')[1]
+    const code = inviteCode.includes("chat.whatsapp.com/")
+      ? inviteCode.split("chat.whatsapp.com/")[1]
       : inviteCode;
     try {
       const result = await sock.groupAcceptInvite(code);
       return { success: true, groupId: result };
     } catch (err) {
       if (err instanceof HttpException) throw err;
-      throw new BadRequestException('Invalid or expired invite code');
+      throw new BadRequestException("Invalid or expired invite code");
     }
   }
 
@@ -1492,7 +1712,10 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
   ): Promise<{ groupId: string; profilePictureUrl: string | null }> {
     const sock = this.getSocket(sessionId);
     try {
-      const url = await sock.profilePictureUrl(this.toGroupJid(groupId), 'image');
+      const url = await sock.profilePictureUrl(
+        this.toGroupJid(groupId),
+        "image",
+      );
       return { groupId, profilePictureUrl: url };
     } catch {
       return { groupId, profilePictureUrl: null };
@@ -1511,9 +1734,12 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
 
   // ─── Contacts & profile ────────────────────────────────────────────────
 
-  async checkNumber(sessionId: string, number: string): Promise<ContactCheckResult> {
+  async checkNumber(
+    sessionId: string,
+    number: string,
+  ): Promise<ContactCheckResult> {
     const sock = this.getSocket(sessionId);
-    const [result] = await sock.onWhatsApp(number.replace(/[^0-9]/g, ''));
+    const [result] = await sock.onWhatsApp(number.replace(/[^0-9]/g, ""));
     return {
       number,
       jid: result?.jid,
@@ -1522,7 +1748,10 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     };
   }
 
-  async checkNumbers(sessionId: string, numbers: string[]): Promise<ContactCheckResult[]> {
+  async checkNumbers(
+    sessionId: string,
+    numbers: string[],
+  ): Promise<ContactCheckResult[]> {
     return Promise.all(numbers.map((n) => this.checkNumber(sessionId, n)));
   }
 
@@ -1534,7 +1763,10 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     const sock = this.getSocket(sessionId);
     const jid = this.toJid(number);
     try {
-      const url = await sock.profilePictureUrl(jid, highRes ? 'image' : 'preview');
+      const url = await sock.profilePictureUrl(
+        jid,
+        highRes ? "image" : "preview",
+      );
       return { jid, profilePictureUrl: url };
     } catch {
       return { jid, profilePictureUrl: null };
@@ -1548,7 +1780,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     const sock = this.getSocket(sessionId);
     const jid = this.toJid(number);
     try {
-      const status = await sock.fetchStatus(jid) as any;
+      const status = (await sock.fetchStatus(jid)) as any;
       return { jid, about: status?.status || null, setAt: status?.setAt };
     } catch {
       return { jid, about: null };
@@ -1561,7 +1793,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
   ): Promise<{ jid: string; blocked: boolean }> {
     const sock = this.getSocket(sessionId);
     const jid = this.toJid(number);
-    await sock.updateBlockStatus(jid, 'block');
+    await sock.updateBlockStatus(jid, "block");
     return { jid, blocked: true };
   }
 
@@ -1571,7 +1803,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
   ): Promise<{ jid: string; blocked: boolean }> {
     const sock = this.getSocket(sessionId);
     const jid = this.toJid(number);
-    await sock.updateBlockStatus(jid, 'unblock');
+    await sock.updateBlockStatus(jid, "unblock");
     return { jid, blocked: false };
   }
 
@@ -1593,7 +1825,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     return {
       jid: user?.id,
       name: user?.name,
-      phoneNumber: user?.id?.split(':')[0],
+      phoneNumber: user?.id?.split(":")[0],
     };
   }
 
@@ -1620,12 +1852,16 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     imageUrl: string,
   ): Promise<{ success: boolean }> {
     const sock = this.getSocket(sessionId);
-    const buffer = await safeFetch(imageUrl, { maxBytes: 5 * 1024 * 1024 }).then((r) => r.buffer());
+    const buffer = await safeFetch(imageUrl, {
+      maxBytes: 5 * 1024 * 1024,
+    }).then((r) => r.buffer());
     await sock.updateProfilePicture(sock.user!.id, buffer);
     return { success: true };
   }
 
-  async removeOwnProfilePicture(sessionId: string): Promise<{ success: boolean }> {
+  async removeOwnProfilePicture(
+    sessionId: string,
+  ): Promise<{ success: boolean }> {
     const sock = this.getSocket(sessionId);
     await sock.removeProfilePicture(sock.user!.id);
     return { success: true };
@@ -1633,20 +1869,26 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
 
   // ─── Session config ────────────────────────────────────────────────────
 
-  async patchSessionConfig(sessionId: string, patch: Partial<SessionConfig>): Promise<{ config: SessionConfig }> {
+  async patchSessionConfig(
+    sessionId: string,
+    patch: Partial<SessionConfig>,
+  ): Promise<{ config: SessionConfig }> {
     const sessionPath = this.resolveSessionPath(sessionId);
-    const existing = this.sessionConfigs.get(sessionId) ?? SESSION_CONFIG_DEFAULTS;
+    const existing =
+      this.sessionConfigs.get(sessionId) ?? SESSION_CONFIG_DEFAULTS;
     const merged: SessionConfig = { ...existing, ...patch };
 
     // Cross-field validation
     if (merged.random_delay_max_ms < merged.random_delay_min_ms) {
-      throw new BadRequestException('random_delay_max_ms must be >= random_delay_min_ms');
+      throw new BadRequestException(
+        "random_delay_max_ms must be >= random_delay_min_ms",
+      );
     }
 
     // Atomic write
-    const configFile = path.join(sessionPath, 'config.json');
-    const tmpFile = configFile + '.tmp';
-    fs.writeFileSync(tmpFile, JSON.stringify(merged), 'utf8');
+    const configFile = path.join(sessionPath, "config.json");
+    const tmpFile = configFile + ".tmp";
+    fs.writeFileSync(tmpFile, JSON.stringify(merged), "utf8");
     fs.renameSync(tmpFile, configFile);
 
     // Update in-memory map
@@ -1659,7 +1901,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
     }
 
     // Fire webhook event
-    await this.webhookService.fire('session.config_updated', sessionId, merged);
+    await this.webhookService.fire("session.config_updated", sessionId, merged);
 
     return { config: merged };
   }
