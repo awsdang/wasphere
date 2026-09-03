@@ -928,7 +928,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       const fallback =
         type === "stickerMessage"
           ? "image/webp"
-          : type === "videoMessage"c
+          : type === "videoMessage"
             ? "video/mp4"
             : type === "audioMessage"
               ? "audio/ogg"
