@@ -24,6 +24,113 @@ function mapType(contentType: unknown): string {
   return TYPE_MAP[contentType] ?? contentType;
 }
 
+/**
+ * Fallback for Baileys v7 wrapped messages.
+ * wa-server sends a normalized/sanitized `message`, so if its legacy top-level
+ * `type/content` extraction produced unknown/empty data, recover the renderable
+ * payload here rather than storing a blank message.
+ */
+function inferFromSanitizedMessage(m: Record<string, any> | undefined): {
+  type: string;
+  content: Record<string, unknown>;
+} | null {
+  const msg = m?.message as Record<string, any> | undefined;
+  if (!msg) return null;
+
+  if (typeof msg.conversation === 'string') {
+    return { type: 'text', content: { text: msg.conversation } };
+  }
+  if (msg.extendedTextMessage) {
+    return {
+      type: 'text',
+      content: {
+        text: msg.extendedTextMessage.text ?? null,
+        quotedMessageId: msg.extendedTextMessage.contextInfo?.stanzaId ?? null,
+      },
+    };
+  }
+  if (msg.imageMessage) {
+    return {
+      type: 'image',
+      content: {
+        caption: msg.imageMessage.caption ?? null,
+        mimetype: msg.imageMessage.mimetype ?? null,
+      },
+    };
+  }
+  if (msg.videoMessage) {
+    return {
+      type: 'video',
+      content: {
+        caption: msg.videoMessage.caption ?? null,
+        mimetype: msg.videoMessage.mimetype ?? null,
+      },
+    };
+  }
+  if (msg.audioMessage) {
+    return {
+      type: 'audio',
+      content: {
+        isVoiceNote: msg.audioMessage.ptt ?? false,
+        mimetype: msg.audioMessage.mimetype ?? null,
+        seconds: msg.audioMessage.seconds ?? null,
+      },
+    };
+  }
+  if (msg.documentMessage) {
+    return {
+      type: 'document',
+      content: {
+        fileName: msg.documentMessage.fileName ?? null,
+        mimetype: msg.documentMessage.mimetype ?? null,
+        pageCount: msg.documentMessage.pageCount ?? null,
+      },
+    };
+  }
+  if (msg.stickerMessage) {
+    return { type: 'sticker', content: { isAnimated: msg.stickerMessage.isAnimated ?? false } };
+  }
+  if (msg.locationMessage) {
+    return {
+      type: 'location',
+      content: {
+        latitude: msg.locationMessage.degreesLatitude ?? null,
+        longitude: msg.locationMessage.degreesLongitude ?? null,
+        name: msg.locationMessage.name ?? null,
+        address: msg.locationMessage.address ?? null,
+      },
+    };
+  }
+  if (msg.contactMessage) {
+    return {
+      type: 'contact',
+      content: {
+        displayName: msg.contactMessage.displayName ?? null,
+        vcard: msg.contactMessage.vcard ?? null,
+      },
+    };
+  }
+  if (msg.pollCreationMessage) {
+    return {
+      type: 'poll',
+      content: {
+        name: msg.pollCreationMessage.name ?? null,
+        options: msg.pollCreationMessage.options ?? [],
+      },
+    };
+  }
+  if (msg.reactionMessage) {
+    return {
+      type: 'reaction',
+      content: {
+        reaction: msg.reactionMessage.text ?? null,
+        replyMessageId: msg.reactionMessage.key?.id ?? null,
+      },
+    };
+  }
+  return null;
+}
+
 // messageTimestamp may be a number (unix seconds) or a protobuf Long {low,high}.
 function toUnixSeconds(ts: unknown): number {
   if (typeof ts === 'number') return ts;
@@ -39,6 +146,7 @@ function previewFor(type: string, body: string | null): string {
     image: '📷 Photo', video: '🎥 Video', audio: '🎙️ Voice note',
     document: '📄 Document', sticker: '🌟 Sticker', location: '📍 Location',
     contact: '👤 Contact', poll: '📊 Poll', reaction: '👍 Reaction',
+    failed: '⚠️ Failed message',
   };
   return labels[type] ?? type;
 }
@@ -48,16 +156,12 @@ function previewFor(type: string, body: string | null): string {
  * the existing `POST /internal/webhook-event/:workspaceId` path alongside the
  * webhook fan-out (it does not replace it). Idempotent on (workspace, waMessageId).
  */
-const STATUS_RANK: Record<string, number> = { SENT: 1, DELIVERED: 2, READ: 3 };
+const STATUS_RANK: Record<string, number> = { FAILED: 0, SENT: 1, DELIVERED: 2, READ: 3 };
 
 @Injectable()
 export class InboxIngestService {
   private readonly logger = new Logger(InboxIngestService.name);
 
-  // Delivery statuses can arrive BEFORE the outbound message row exists (the
-  // message.sent mirror and messages.update are independent fire-and-forget
-  // POSTs with no ordering guarantee). Buffer the highest unmatched status per
-  // message here, then apply it when the row is created. Short-lived (pruned).
   private readonly pendingStatus = new Map<string, { status: string; ts: number }>();
 
   constructor(
@@ -68,17 +172,15 @@ export class InboxIngestService {
   private rememberPendingStatus(workspaceId: string, waMessageId: string, status: string): void {
     const key = `${workspaceId}:${waMessageId}`;
     const prev = this.pendingStatus.get(key);
-    if (!prev || (STATUS_RANK[status] ?? 0) > (STATUS_RANK[prev.status] ?? 0)) {
+    if (!prev || status === 'FAILED' || (STATUS_RANK[status] ?? 0) > (STATUS_RANK[prev.status] ?? 0)) {
       this.pendingStatus.set(key, { status, ts: Date.now() });
     }
-    // Prune entries older than 5 min so the map can't grow unbounded.
     if (this.pendingStatus.size > 1000) {
       const cutoff = Date.now() - 5 * 60_000;
       for (const [k, v] of this.pendingStatus) if (v.ts < cutoff) this.pendingStatus.delete(k);
     }
   }
 
-  /** Apply (and clear) any buffered delivery status for a freshly-stored message. */
   private async applyPendingStatus(workspaceId: string, waMessageId: string): Promise<void> {
     const key = `${workspaceId}:${waMessageId}`;
     const pending = this.pendingStatus.get(key);
@@ -86,14 +188,13 @@ export class InboxIngestService {
     this.pendingStatus.delete(key);
     const res = await this.prisma.message.updateMany({
       where: { workspaceId, waMessageId },
-      data: { status: pending.status as 'SENT' | 'DELIVERED' | 'READ' },
+      data: { status: pending.status as 'FAILED' | 'SENT' | 'DELIVERED' | 'READ' },
     });
     if (res.count > 0) {
       this.events.emit({ type: 'message.status', workspaceId, payload: { waMessageId, status: pending.status } });
     }
   }
 
-  /** Fire-and-forget entry point — never blocks the internal 202 response. */
   ingest(workspaceId: string, dto: WebhookEventDto): void {
     this.handle(workspaceId, dto).catch((err: unknown) => {
       this.logger.error(
@@ -127,7 +228,6 @@ export class InboxIngestService {
     const waMessageId: string | undefined = data.messageId ?? m?.key?.id;
     if (!rawJid || !waMessageId) return;
 
-    // v1.1 is 1:1 only — skip groups, status, broadcast lists and channels.
     if (
       rawJid.endsWith('@g.us') ||
       rawJid.endsWith('@broadcast') ||
@@ -138,9 +238,6 @@ export class InboxIngestService {
       return;
     }
 
-    // LID addressing: WhatsApp now sends an opaque "<id>@lid" as the chat id.
-    // The real phone-number JID arrives as senderJid/senderPn — prefer it so we
-    // store/display the true number and reply to a deliverable address.
     const senderPn: string | undefined = data.senderPn ?? m?.key?.senderPn ?? undefined;
     const isLid = rawJid.endsWith('@lid');
     const jid: string = data.senderJid ?? (isLid && senderPn ? senderPn : rawJid);
@@ -150,24 +247,33 @@ export class InboxIngestService {
     const avatarUrl: string | null = (data.avatarUrl as string) ?? null;
     const phone = jid.split('@')[0].replace(/[^0-9]/g, '');
     const waTimestamp = new Date(toUnixSeconds(data.timestamp ?? m?.messageTimestamp) * 1000);
-    const type = mapType(data.type);
+
+    const fallback = inferFromSanitizedMessage(m);
+    const originalType = mapType(data.type);
+    const originalContent = { ...(data.content ?? {}) } as Record<string, unknown>;
+    const hasUsefulTopLevelContent =
+      originalType !== 'unknown' &&
+      Object.values(originalContent).some((v) => v !== null && v !== undefined && v !== '');
+
+    const type = hasUsefulTopLevelContent ? originalType : (fallback?.type ?? originalType);
+    const content: Record<string, unknown> = hasUsefulTopLevelContent
+      ? originalContent
+      : { ...originalContent, ...(fallback?.content ?? {}) };
+
     const body: string | null =
-      data.content?.text ?? data.content?.caption ?? data.content?.reaction ?? null;
-    // Downloaded media arrives as a base64 data URI; keep it in mediaUrl, not
-    // in payload (so the JSON column stays small).
-    const content: Record<string, unknown> = { ...(data.content ?? {}) };
+      (content.text as string | undefined) ??
+      (content.caption as string | undefined) ??
+      (content.reaction as string | undefined) ??
+      null;
+
     const mediaUrl: string | null = (content.dataUri as string) ?? null;
     delete content.dataUri;
 
-    // Idempotency guard (the @@unique constraint is the ultimate backstop).
     const dup = await this.prisma.message.findUnique({
       where: { workspaceId_waMessageId: { workspaceId, waMessageId } },
       select: { id: true, type: true, conversationId: true },
     });
     if (dup) {
-      // A message can arrive first as an undecryptable placeholder (envelope
-      // failed) and then again decrypted after a Signal retry — same waMessageId.
-      // Upgrade the placeholder in place instead of dropping the real content.
       if (dup.type === 'unknown' && type !== 'unknown') {
         await this.prisma.message.update({
           where: { id: dup.id },
@@ -224,9 +330,7 @@ export class InboxIngestService {
         where: { id: convo.id },
         data: {
           lastPreview: previewFor(type, body),
-          // max() semantics — never move lastMessageAt backwards
           lastMessageAt: waTimestamp > convo.lastMessageAt ? waTimestamp : convo.lastMessageAt,
-          // a live message proves the session is back — clear any stale archive flag
           ...(convo.sessionDeletedAt ? { sessionDeletedAt: null } : {}),
           ...(fromMe ? {} : { unreadCount: { increment: 1 } }),
         },
@@ -238,10 +342,6 @@ export class InboxIngestService {
     this.events.emit({ type: 'message.new', workspaceId, conversationId });
   }
 
-  // Outbound messages sent via ANY path (API, tester, or inbox composer) are
-  // mirrored here so they appear in the thread and collect status ticks.
-  // Idempotent on (workspace, waMessageId) — the composer also writes its own
-  // copy, so we upsert rather than duplicate.
   private async ingestOutbound(workspaceId: string, dto: WebhookEventDto): Promise<void> {
     const data = dto.data as Record<string, any>;
     const to: string | undefined = data.to;
@@ -249,7 +349,6 @@ export class InboxIngestService {
     if (!to || !waMessageId) return;
 
     const jid = String(to).includes('@') ? String(to) : `${String(to).replace(/[^0-9]/g, '')}@s.whatsapp.net`;
-    // Skip groups/broadcast — 1:1 inbox only (mirror of the inbound guard).
     if (jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@newsletter')) return;
 
     const phone = jid.split('@')[0].replace(/[^0-9]/g, '');
@@ -273,7 +372,7 @@ export class InboxIngestService {
       });
       await tx.message.upsert({
         where: { workspaceId_waMessageId: { workspaceId, waMessageId } },
-        update: {}, // already recorded (e.g. by the inbox composer) — no-op
+        update: {},
         create: {
           workspaceId,
           conversationId: convo.id,
@@ -299,12 +398,10 @@ export class InboxIngestService {
       return convo.id;
     });
 
-    // A delivery status may have raced ahead of this row — apply it now.
     await this.applyPendingStatus(workspaceId, waMessageId);
     this.events.emit({ type: 'message.new', workspaceId, conversationId });
   }
 
-  // Delivery-status updates (sent -> delivered -> read) keyed by waMessageId.
   private async applyStatusUpdates(workspaceId: string, dto: WebhookEventDto): Promise<void> {
     const raw = dto.data as unknown;
     const updates = Array.isArray(raw) ? raw : [raw];
@@ -324,16 +421,12 @@ export class InboxIngestService {
         this.logger.debug(`[Inbox] status ${status} applied to ${waMessageId} (${res.count} row)`);
         this.events.emit({ type: 'message.status', workspaceId, payload: { waMessageId, status } });
       } else {
-        // The message row may not exist yet (status raced ahead of the
-        // message.sent mirror). Buffer it; ingestOutbound applies it on insert.
         this.rememberPendingStatus(workspaceId, waMessageId, status);
         this.logger.debug(`[Inbox] status ${status} buffered for ${waMessageId} (row not yet present)`);
       }
     }
   }
 
-  // Re-link / reconnect of a session un-archives its conversations so the
-  // operator can reply again (mirror of archiveSession).
   private async restoreSession(workspaceId: string, sessionId: string): Promise<void> {
     const res = await this.prisma.conversation.updateMany({
       where: { workspaceId, sessionId, sessionDeletedAt: { not: null } },
@@ -355,9 +448,13 @@ export class InboxIngestService {
   }
 }
 
-// Baileys WAMessageStatus enum: 1=PENDING 2=SERVER_ACK(sent) 3=DELIVERY_ACK(delivered) 4=READ 5=PLAYED
-function mapDeliveryStatus(n: unknown): 'SENT' | 'DELIVERED' | 'READ' | undefined {
+// Baileys WAMessageStatus: ERROR=0, PENDING=1, SERVER_ACK=2,
+// DELIVERY_ACK=3, READ=4, PLAYED=5.
+function mapDeliveryStatus(n: unknown): 'FAILED' | 'SENT' | 'DELIVERED' | 'READ' | undefined {
   switch (n) {
+    case 0:
+    case 'ERROR':
+      return 'FAILED';
     case 2:
     case 'SERVER_ACK':
       return 'SENT';
