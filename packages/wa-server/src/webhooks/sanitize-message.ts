@@ -1,4 +1,5 @@
 import type { proto } from '@whiskeysockets/baileys';
+import { resolveKeyAddressing } from '../whatsapp/key-addressing';
 
 // ─── Output types (allowlist-driven) ──────────────────────────────────────────
 
@@ -102,17 +103,16 @@ export function sanitizeMessage(msg: proto.IWebMessageInfo | null | undefined): 
     remoteJidAlt?: string | null;
     participantAlt?: string | null;
   }) | undefined;
-  const remoteJid = msg.key?.remoteJid ?? null;
-  const participant = msg.key?.participant ?? null;
+  const keyMeta = resolveKeyAddressing(k);
   const key: SanitizedKey = {
-    remoteJid,
+    remoteJid: msg.key?.remoteJid,
     fromMe: msg.key?.fromMe,
     id: msg.key?.id,
-    participant,
-    senderPn: k?.senderPn ?? (remoteJid?.endsWith('@lid') ? k?.remoteJidAlt ?? null : remoteJid ?? null),
-    senderLid: k?.senderLid ?? (remoteJid?.endsWith('@lid') ? remoteJid : null),
-    participantPn: k?.participantPn ?? k?.participantAlt ?? (participant?.endsWith('@lid') ? null : participant ?? null),
-    participantLid: k?.participantLid ?? (participant?.endsWith('@lid') ? participant : null),
+    participant: msg.key?.participant,
+    senderPn: keyMeta.senderPn,
+    senderLid: keyMeta.senderLid,
+    participantPn: keyMeta.participantPn,
+    participantLid: keyMeta.participantLid,
   };
 
   const content = buildMessageContent(msg.message);

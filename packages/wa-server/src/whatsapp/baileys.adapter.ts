@@ -51,6 +51,7 @@ import {
   SessionConfig,
   SESSION_CONFIG_DEFAULTS,
 } from "./session-config.interface";
+import { BaileysAddressingKey, resolveKeyAddressing } from "./key-addressing";
 
 // Allowlist for Baileys disconnect reason strings surfaced in API responses / webhooks.
 // Prevents raw Boom payload text (which may contain internal state) reaching clients.
@@ -71,42 +72,6 @@ const SAFE_DISCONNECT_REASONS: Record<string, string> = {
 
 function sanitiseReason(raw: string): string {
   return SAFE_DISCONNECT_REASONS[raw] ?? "Disconnected";
-}
-
-type BaileysAltKey = {
-  remoteJid?: string | null;
-  participant?: string | null;
-  remoteJidAlt?: string | null;
-  participantAlt?: string | null;
-  senderPn?: string | null;
-  senderLid?: string | null;
-  participantPn?: string | null;
-  participantLid?: string | null;
-};
-
-function resolveKeyAddressing(key: BaileysAltKey | undefined | null) {
-  const remoteJid = key?.remoteJid ?? null;
-  const participant = key?.participant ?? null;
-
-  const senderPn =
-    key?.senderPn ??
-    (remoteJid?.endsWith("@lid") ? key?.remoteJidAlt ?? null : remoteJid);
-  const senderLid =
-    key?.senderLid ?? (remoteJid?.endsWith("@lid") ? remoteJid : null);
-  const participantPn =
-    key?.participantPn ?? key?.participantAlt ??
-    (participant?.endsWith("@lid") ? null : participant);
-  const participantLid =
-    key?.participantLid ?? (participant?.endsWith("@lid") ? participant : null);
-
-  return {
-    senderPn,
-    senderLid,
-    participantPn,
-    participantLid,
-    senderJid: senderPn ?? remoteJid ?? "",
-    sender: participantPn ?? participant ?? remoteJid ?? "",
-  };
 }
 
 // Fallback WA protocol version used when fetchLatestBaileysVersion() fails.
@@ -761,7 +726,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       // itself (remoteJidAlt / participantAlt). Prefer those when present;
       // otherwise fall back to the legacy senderPn / senderLid fields. This stops
       // the opaque `<id>@lid` from being mistaken for a real phone number.
-      const keyMeta = resolveKeyAddressing(msg.key as BaileysAltKey | undefined);
+      const keyMeta = resolveKeyAddressing(msg.key as BaileysAddressingKey | undefined);
       const senderPn = keyMeta.senderPn ?? null;
       const senderJid = keyMeta.senderJid;
       const avatarUrl = await this.getAvatarUrl(sessionId, senderJid);
@@ -1009,7 +974,7 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       // Per Baileys issue #2342 the winning combo for current WhatsApp is
       // creator=LID + voter=PN, so we list those first. For v7, the alternate
       // PN/LID values live on the key itself, not in the raw @lid string.
-      const vk = msg.key as BaileysAltKey | undefined;
+      const vk = msg.key as BaileysAddressingKey | undefined;
       const voterMeta = resolveKeyAddressing(vk);
       const voterPn = voterMeta.senderPn ? jidNormalizedUser(voterMeta.senderPn) : "";
       const voterLid = voterMeta.senderLid ? jidNormalizedUser(voterMeta.senderLid) : "";
