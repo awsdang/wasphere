@@ -1,4 +1,5 @@
 import type { proto } from '@whiskeysockets/baileys';
+import { normalizeMessageContent } from '@whiskeysockets/baileys';
 import { resolveKeyAddressing } from '../whatsapp/key-addressing';
 
 // ─── Output types (allowlist-driven) ──────────────────────────────────────────
@@ -115,7 +116,12 @@ export function sanitizeMessage(msg: proto.IWebMessageInfo | null | undefined): 
     participantLid: keyMeta.participantLid,
   };
 
-  const content = buildMessageContent(msg.message);
+  // Baileys v7 may wrap the real content in ephemeralMessage, viewOnceMessage,
+  // documentWithCaptionMessage, editedMessage, associatedChildMessage, etc.
+  // Normalize before sanitizing so downstream Inbox ingestion sees the actual
+  // conversation/extendedTextMessage/media payload rather than an empty wrapper.
+  const normalized = normalizeMessageContent(msg.message) ?? msg.message;
+  const content = buildMessageContent(normalized);
 
   return {
     key,
