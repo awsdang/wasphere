@@ -1,165 +1,188 @@
 services:
 
-  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  # ────────────────────────────────────────────────────────────────────────────
+  # PostgreSQL
+  # ────────────────────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+
     volumes:
       - wa-postgres:/var/lib/postgresql/data
-    networks:
-      - internal
+
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
 
-  # ── Dashboard API ───────────────────────────────────────────────────────────
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Dashboard API
+  # ────────────────────────────────────────────────────────────────────────────
   dashboard-api:
     build:
       context: .
       dockerfile: packages/dashboard-api/Dockerfile
+
     restart: unless-stopped
+
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+
       JWT_SECRET: ${JWT_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       INTERNAL_WEBHOOK_SECRET: ${INTERNAL_WEBHOOK_SECRET}
+
       CORS_ORIGIN: ${DASHBOARD_UI_URL}
-      # Public UI base for links in emails (password reset, invites).
       DASHBOARD_UI_URL: ${DASHBOARD_UI_URL}
+
       DASHBOARD_PORT: "3000"
-      # Public API URL — webhook media download links point here (e.g.
-      # https://api.your-domain.com). Empty keeps base64 inline.
-      MEDIA_BASE_URL: ${MEDIA_BASE_URL:-https://${DASHBOARD_API_DOMAIN}}
-      # Email / SMTP (optional — blank SMTP_HOST disables email; see .env.prod.example).
+
+      # Public API URL used for webhook media download links.
+      MEDIA_BASE_URL: ${MEDIA_BASE_URL}
+
+      # SMTP / Email
+      # Leave SMTP_HOST blank to disable email.
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_SECURE: ${SMTP_SECURE:-false}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
       SMTP_FROM: ${SMTP_FROM:-}
+
       NODE_ENV: production
+
     depends_on:
       postgres:
         condition: service_healthy
-    networks:
-      - internal
-      - dokploy-network
+
+    expose:
+      - "3000"
+
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:3000/health || exit 1"
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 40s
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.wasphere-api.rule=Host(`${DASHBOARD_API_DOMAIN}`)
-      - traefik.http.routers.wasphere-api.entrypoints=websecure
-      - traefik.http.routers.wasphere-api.tls.certresolver=letsencrypt
-      - traefik.http.routers.wasphere-api.service=wasphere-api
-      - traefik.http.routers.wasphere-api.priority=100
-      - traefik.http.services.wasphere-api.loadbalancer.server.port=3000
 
-  # ── WA Server ───────────────────────────────────────────────────────────────
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # WhatsApp Server
+  # ────────────────────────────────────────────────────────────────────────────
   wa-server:
     build:
       context: .
       dockerfile: packages/wa-server/Dockerfile
+
     restart: unless-stopped
+
     environment:
       WA_TOKEN: ${WA_TOKEN}
+
       PORT: "3001"
+
       CORS_ORIGIN: ${DASHBOARD_UI_URL}
+
       WEBHOOK_SIGNING_SECRET: ${WEBHOOK_SIGNING_SECRET}
+
       AUDIT_DASHBOARD_URL: http://dashboard-api:3000/internal/audit
       INTERNAL_WEBHOOK_SECRET: ${INTERNAL_WEBHOOK_SECRET}
-      # Do NOT set this in .env — the dashboard registers the callback URL
-      # automatically on first start and persists it to the sessions volume.
-      # Setting a wrong value here causes a self-loop and breaks all webhooks.
+
+      # Normally leave blank.
+      # Dashboard registers its callback automatically.
       DASHBOARD_WEBHOOK_URL: ${DASHBOARD_WEBHOOK_URL:-}
-      # Meta WhatsApp Cloud API provider (opt-in). Ships DISABLED.
+
+      # Meta WhatsApp Cloud API
       META_PROVIDER_ENABLED: ${META_PROVIDER_ENABLED:-false}
       GRAPH_VERSION: ${GRAPH_VERSION:-v22.0}
+
       NODE_ENV: production
+
     volumes:
       - wa-sessions:/app/sessions
+
     depends_on:
       dashboard-api:
         condition: service_healthy
-    networks:
-      - internal
-      # Only joined to the public network so Traefik can route the Meta webhook
-      # path below. The dashboard still reaches wa-server over `internal`.
-      - dokploy-network
+
+    expose:
+      - "3001"
+
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/api/health/live || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:3001/api/health/live || exit 1"
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 20s
-    # Public route is SCOPED to the Meta webhook path only — every other
-    # wa-server endpoint stays private (reachable just over `internal`). Set
-    # WA_SERVER_DOMAIN in your env (e.g. wa.your-domain.com) and point its DNS
-    # at this host. Needed only if you receive on the Meta Cloud API provider.
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.wasphere-wa-webhook.rule=Host(`${WA_SERVER_DOMAIN}`) && PathPrefix(`/api/meta/webhook`)
-      - traefik.http.routers.wasphere-wa-webhook.entrypoints=websecure
-      - traefik.http.routers.wasphere-wa-webhook.tls.certresolver=letsencrypt
-      - traefik.http.routers.wasphere-wa-webhook.service=wasphere-wa-webhook
-      # High priority so this beats any wildcard Host(`*.domain`) router from
-      # another app sharing the Traefik instance (e.g. a whitelabel catch-all).
-      - traefik.http.routers.wasphere-wa-webhook.priority=1000
-      - traefik.http.services.wasphere-wa-webhook.loadbalancer.server.port=3001
-
-  # ── Dashboard UI ─────────────────────────────────────────────────────────────
+                
+  # ────────────────────────────────────────────────────────────────────────────
+  # Dashboard UI
+  # ────────────────────────────────────────────────────────────────────────────
   dashboard-ui:
     build:
       context: .
       dockerfile: packages/dashboard-ui/Dockerfile
+
     restart: unless-stopped
+
     environment:
+      # Internal Docker service URLs
       DASHBOARD_API_URL: http://dashboard-api:3000
       WA_SERVER_INTERNAL_URL: http://wa-server:3001
-      # Public URL of the WA Server — used only to auto-fill the Meta webhook
-      # callback URL in the New-Session dialog. Set to https://${WA_SERVER_DOMAIN}.
-      WA_SERVER_PUBLIC_URL: ${WA_SERVER_PUBLIC_URL:-}
+
+      # Public URL used when generating/configuring Meta webhook callback.
+      WA_SERVER_PUBLIC_URL: ${WA_SERVER_PUBLIC_URL}
+
       NODE_ENV: production
+
     depends_on:
       dashboard-api:
         condition: service_healthy
-    networks:
-      - internal
-      - dokploy-network
+
+    expose:
+      - "3004"
+
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3004/login || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:3004/login || exit 1"
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 30s
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.wasphere-ui.rule=Host(`${DASHBOARD_UI_DOMAIN}`)
-      - traefik.http.routers.wasphere-ui.entrypoints=websecure
-      - traefik.http.routers.wasphere-ui.tls.certresolver=letsencrypt
-      - traefik.http.routers.wasphere-ui.service=wasphere-ui
-      - traefik.http.routers.wasphere-ui.priority=100
-      - traefik.http.services.wasphere-ui.loadbalancer.server.port=3004
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Persistent Data
+# ──────────────────────────────────────────────────────────────────────────────
 volumes:
+
+  # PostgreSQL database
   wa-postgres:
     driver: local
+
+  # WhatsApp sessions
   wa-sessions:
     driver: local
-
-networks:
-  internal:
-    driver: bridge
-  dokploy-network:
-    external: true
