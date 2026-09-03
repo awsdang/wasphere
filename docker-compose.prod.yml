@@ -75,6 +75,13 @@ services:
     expose:
       - "3000"
 
+      
+    networks:
+      default:
+      dokploy-network:
+        aliases:
+          - wasphere-dashboard
+          
     healthcheck:
       test:
         [
@@ -121,7 +128,13 @@ services:
 
     volumes:
       - wa-sessions:/app/sessions
-
+      
+    networks:
+      default:
+      dokploy-network:
+        aliases:
+          - wasphere-server
+          
     depends_on:
       dashboard-api:
         condition: service_healthy
