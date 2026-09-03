@@ -99,16 +99,20 @@ export function sanitizeMessage(msg: proto.IWebMessageInfo | null | undefined): 
     senderLid?: string | null;
     participantPn?: string | null;
     participantLid?: string | null;
+    remoteJidAlt?: string | null;
+    participantAlt?: string | null;
   }) | undefined;
+  const remoteJid = msg.key?.remoteJid ?? null;
+  const participant = msg.key?.participant ?? null;
   const key: SanitizedKey = {
-    remoteJid: msg.key?.remoteJid,
+    remoteJid,
     fromMe: msg.key?.fromMe,
     id: msg.key?.id,
-    participant: msg.key?.participant,
-    senderPn: k?.senderPn,
-    senderLid: k?.senderLid,
-    participantPn: k?.participantPn,
-    participantLid: k?.participantLid,
+    participant,
+    senderPn: k?.senderPn ?? (remoteJid?.endsWith('@lid') ? k?.remoteJidAlt ?? null : remoteJid ?? null),
+    senderLid: k?.senderLid ?? (remoteJid?.endsWith('@lid') ? remoteJid : null),
+    participantPn: k?.participantPn ?? k?.participantAlt ?? (participant?.endsWith('@lid') ? null : participant ?? null),
+    participantLid: k?.participantLid ?? (participant?.endsWith('@lid') ? participant : null),
   };
 
   const content = buildMessageContent(msg.message);

@@ -73,6 +73,42 @@ function sanitiseReason(raw: string): string {
   return SAFE_DISCONNECT_REASONS[raw] ?? "Disconnected";
 }
 
+type BaileysAltKey = {
+  remoteJid?: string | null;
+  participant?: string | null;
+  remoteJidAlt?: string | null;
+  participantAlt?: string | null;
+  senderPn?: string | null;
+  senderLid?: string | null;
+  participantPn?: string | null;
+  participantLid?: string | null;
+};
+
+function resolveKeyAddressing(key: BaileysAltKey | undefined | null) {
+  const remoteJid = key?.remoteJid ?? null;
+  const participant = key?.participant ?? null;
+
+  const senderPn =
+    key?.senderPn ??
+    (remoteJid?.endsWith("@lid") ? key?.remoteJidAlt ?? null : remoteJid);
+  const senderLid =
+    key?.senderLid ?? (remoteJid?.endsWith("@lid") ? remoteJid : null);
+  const participantPn =
+    key?.participantPn ?? key?.participantAlt ??
+    (participant?.endsWith("@lid") ? null : participant);
+  const participantLid =
+    key?.participantLid ?? (participant?.endsWith("@lid") ? participant : null);
+
+  return {
+    senderPn,
+    senderLid,
+    participantPn,
+    participantLid,
+    senderJid: senderPn ?? remoteJid ?? "",
+    sender: participantPn ?? participant ?? remoteJid ?? "",
+  };
+}
+
 // Fallback WA protocol version used when fetchLatestBaileysVersion() fails.
 // Source: @whiskeysockets/baileys src/Defaults/baileys-version.json as of 2026-05-20
 //   (Baileys 6.7.21, last verified against WhiskeySockets/Baileys commit history)
@@ -721,28 +757,23 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
       }
       const isGroup = msg.key.remoteJid?.endsWith("@g.us");
 
-      // LID addressing: remoteJid may be an opaque "<id>@lid". The real phone
-      // number (PN) is on key.senderPn. Forward both so the dashboard resolves
-      // the true number for display + as the reply target.
-      const lidKey = msg.key as typeof msg.key & {
-        senderPn?: string | null;
-        senderLid?: string | null;
-      };
-      const senderPn = lidKey.senderPn ?? null;
-
-      const senderJid = senderPn ?? msg.key.remoteJid ?? "";
+      // LID addressing: Baileys v7 carries alternate PN/LID JIDs on the key
+      // itself (remoteJidAlt / participantAlt). Prefer those when present;
+      // otherwise fall back to the legacy senderPn / senderLid fields. This stops
+      // the opaque `<id>@lid` from being mistaken for a real phone number.
+      const keyMeta = resolveKeyAddressing(msg.key as BaileysAltKey | undefined);
+      const senderPn = keyMeta.senderPn ?? null;
+      const senderJid = keyMeta.senderJid;
       const avatarUrl = await this.getAvatarUrl(sessionId, senderJid);
 
       const basePayload = {
         messageId: msg.key.id,
         from: msg.key.remoteJid,
-        sender: msg.key.participant || msg.key.remoteJid,
+        sender: keyMeta.sender,
         // canonical phone-number JID (falls back to remoteJid when not @lid)
         senderJid,
         senderPn,
-        senderLid:
-          lidKey.senderLid ??
-          (msg.key.remoteJid?.endsWith("@lid") ? msg.key.remoteJid : null),
+        senderLid: keyMeta.senderLid,
         avatarUrl,
         isGroup,
         timestamp: msg.messageTimestamp,
@@ -976,12 +1007,12 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
 
       // Voter + creator can each be addressed by LID or phone-number (PN).
       // Per Baileys issue #2342 the winning combo for current WhatsApp is
-      // creator=LID + voter=PN, so we list those first.
-      const vk = msg.key as typeof msg.key & { senderPn?: string | null };
-      const voterPn = vk.senderPn ? jidNormalizedUser(vk.senderPn) : "";
-      const voterLid = msg.key.remoteJid?.endsWith("@lid")
-        ? jidNormalizedUser(msg.key.remoteJid)
-        : "";
+      // creator=LID + voter=PN, so we list those first. For v7, the alternate
+      // PN/LID values live on the key itself, not in the raw @lid string.
+      const vk = msg.key as BaileysAltKey | undefined;
+      const voterMeta = resolveKeyAddressing(vk);
+      const voterPn = voterMeta.senderPn ? jidNormalizedUser(voterMeta.senderPn) : "";
+      const voterLid = voterMeta.senderLid ? jidNormalizedUser(voterMeta.senderLid) : "";
 
       const pollFromMe = cachedPoll?.key?.fromMe ?? false;
       const creators = pollFromMe
@@ -1037,18 +1068,16 @@ export class BaileysAdapter implements IWhatsAppAdapter, OnModuleInit {
         .filter((a) => a.voters.length > 0)
         .map((a) => a.name);
 
-      const displaySenderPn = vk.senderPn ?? null;
+      const displaySenderPn = voterMeta.senderPn ?? null;
       const displayJid = displaySenderPn ?? msg.key.remoteJid ?? "";
 
       await this.webhookService.fire("message.received", sessionId, {
         messageId: msg.key.id,
         from: msg.key.remoteJid,
-        sender: msg.key.participant || msg.key.remoteJid,
+        sender: voterMeta.sender,
         senderJid: displayJid,
         senderPn: displaySenderPn,
-        senderLid: msg.key.remoteJid?.endsWith("@lid")
-          ? msg.key.remoteJid
-          : null,
+        senderLid: voterMeta.senderLid,
         avatarUrl: await this.getAvatarUrl(sessionId, displayJid),
         isGroup: false,
         timestamp: msg.messageTimestamp,
