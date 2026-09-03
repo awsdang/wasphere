@@ -186,3 +186,7 @@ volumes:
   # WhatsApp sessions
   wa-sessions:
     driver: local
+
+networks:
+  dokploy-network:
+    external: true
